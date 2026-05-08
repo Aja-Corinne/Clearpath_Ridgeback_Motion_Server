@@ -2109,14 +2109,30 @@ def create_app(node: DashboardNode) -> FastAPI:
                 messages: list[dict[str, Any]] = [
                     {
                         "role": "system",
-                        "content": "You are a concise assistant for a Ridgeback R100 autonomous navigation dashboard. Use the provided camera image when relevant. Answer in 1-5 sentences and be direct.",
+                        "content": (
+                            "You are the onboard AI for a Clearpath Ridgeback R100 autonomous mobile robot. "
+                            "The robot navigates real indoor environments using SLAM, Nav2, and a VLM room detector. "
+                            "You CAN dispatch navigation missions: if the user says 'go to room X' or 'return to start', "
+                            "the system automatically forwards the command to the mission orchestrator — you do not need to explain how. "
+                            "You CANNOT execute direct movement commands (move forward, turn left, etc.) via chat — "
+                            "those require the teleop pad on the dashboard. "
+                            "Use the camera image to answer questions about the current environment. "
+                            "Answer in 1-5 sentences and be direct."
+                        ),
                     },
                     {"role": "user", "content": user_content},
                 ]
             else:
                 messages = chat_completion_messages(
                     request.message,
-                    system_prompt="You are a concise assistant for a Ridgeback R100 autonomous navigation dashboard. Answer in 1-5 sentences and be direct.",
+                    system_prompt=(
+                        "You are the onboard AI for a Clearpath Ridgeback R100 autonomous mobile robot. "
+                        "The robot navigates real indoor environments using SLAM, Nav2, and a VLM room detector. "
+                        "You CAN dispatch navigation missions: if the user says 'go to room X' or 'return to start', "
+                        "the system automatically forwards the command to the mission orchestrator. "
+                        "You CANNOT execute direct movement commands via chat — use the teleop pad on the dashboard. "
+                        "Answer in 1-5 sentences and be direct."
+                    ),
                 )
 
             response = node.vlm_client.chat.completions.create(
