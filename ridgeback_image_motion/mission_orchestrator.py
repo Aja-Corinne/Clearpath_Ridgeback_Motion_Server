@@ -27,9 +27,11 @@ try:
         yaw_to_quaternion,
     )
     from ridgeback_image_motion.spatial_memory import SpatialMemory
+    from ridgeback_image_motion.vlm_client import build_vlm_client
 except ImportError:
     from autonomy_common import json_dumps, json_loads, parse_intent_and_room, quaternion_to_yaw_rad, yaw_to_quaternion
     from spatial_memory import SpatialMemory
+    from vlm_client import build_vlm_client
 
 
 class MissionOrchestrator(Node):
@@ -49,6 +51,9 @@ class MissionOrchestrator(Node):
         self.declare_parameter("memory_db_path", "")
         self.declare_parameter("room_min_confidence", 0.55)
         self.declare_parameter("start_tolerance_m", 0.45)
+        self.declare_parameter("exploration_budget_s", 300.0)
+        self.declare_parameter("use_vlm_command_parser", True)
+        self.declare_parameter("vlm_command_timeout_s", 1.5)
 
         reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
         sensor_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
@@ -67,6 +72,19 @@ class MissionOrchestrator(Node):
         db_path = str(self.get_parameter("memory_db_path").value).strip() or None
         self.memory = SpatialMemory(db_path)
         self.session_id = self.memory.create_session({"source": "mission_orchestrator", "map": "blank_slam"})
+
+        self._vlm_client = None
+        self._vlm_config = None
+        if bool(self.get_parameter("use_vlm_command_parser").value):
+            try:
+                self._vlm_client, self._vlm_config = build_vlm_client()
+                self.get_logger().info(
+                    f"VLM command parser enabled: {self._vlm_config.base_url} model={self._vlm_config.model_name}"
+                )
+            except Exception as exc:
+                self.get_logger().warn(f"VLM command parser init failed; using regex fallback: {exc}")
+                self._vlm_client = None
+                self._vlm_config = None
 
         self.pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self.have_pose = False
@@ -117,7 +135,12 @@ class MissionOrchestrator(Node):
     def _command_cb(self, msg: String) -> None:
         payload = json_loads(msg.data, {"command": msg.data})
         command = str(payload.get("command", "")).strip()
-        parsed = parse_intent_and_room(command)
+        parsed = parse_intent_and_room(
+            command,
+            vlm_client=self._vlm_client,
+            vlm_config=self._vlm_config,
+            vlm_timeout_s=float(self.get_parameter("vlm_command_timeout_s").value),
+        )
         intent = parsed["intent"]
         room = parsed["room"]
 
@@ -223,6 +246,24 @@ class MissionOrchestrator(Node):
 
         if self.state in {"EXPLORING", "NAVIGATING_TO_ROOM", "RETURNING_TO_START"} and not self.safety_safe:
             self._fail_or_stop("FAILED", "safety_stop:" + ",".join(str(item) for item in self.safety_reasons))
+
+        if (
+            self.state == "EXPLORING"
+            and self.mission_started_at
+            and time.time() - self.mission_started_at
+            > float(self.get_parameter("exploration_budget_s").value)
+        ):
+            self.get_logger().warn(
+                f"exploration budget exceeded for room={self.target_room}; returning to start"
+            )
+            self.last_error = "exploration_budget_exceeded"
+            self.memory.record_mission(
+                self.command or "mission",
+                "failed",
+                {"reason": self.last_error, "target_room": self.target_room},
+                self.session_id,
+            )
+            self._start_return(self.command)
 
         if self.result_future is not None and self.result_future.done():
             result = self.result_future.result()
@@ -339,6 +380,7 @@ class MissionOrchestrator(Node):
             "safety_safe": self.safety_safe,
             "safety_reasons": self.safety_reasons,
             "elapsed_s": time.time() - self.mission_started_at if self.mission_started_at else 0.0,
+            "mission_started_at": self.mission_started_at,
         }
         self.status_pub.publish(String(data=json_dumps(payload)))
 

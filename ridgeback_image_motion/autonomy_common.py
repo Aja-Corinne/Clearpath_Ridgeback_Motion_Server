@@ -22,21 +22,50 @@ except ImportError:
 ACTIVE_MISSION_STATES = {"STARTING", "EXPLORING", "NAVIGATING_TO_ROOM", "RETURNING_TO_START"}
 
 
-def parse_intent_and_room(text: str) -> dict[str, str]:
+def parse_intent_and_room(
+    text: str,
+    vlm_client: Any = None,
+    vlm_config: Any = None,
+    vlm_timeout_s: float = 1.5,
+) -> dict[str, str]:
+    """Parse an operator command into {intent, room}.
+
+    If ``vlm_client`` and ``vlm_config`` are supplied, the VLM is asked first
+    (handles flexible phrasing). On any failure or absence, falls back to a
+    deterministic regex parser.
+    """
+    if vlm_client is not None and vlm_config is not None and text and text.strip():
+        try:
+            from ridgeback_image_motion.vlm_client import parse_command
+        except ImportError:
+            from vlm_client import parse_command  # type: ignore[no-redef]
+        try:
+            result = parse_command(vlm_client, vlm_config, text, timeout_s=vlm_timeout_s)
+            return {"intent": result["intent"], "room": result["room"]}
+        except Exception:
+            pass
+
     lowered = text.lower().strip()
     room = ""
     room_match = re.search(r"(?:room|rm|r)\s*#?\s*([a-z]?\d{2,4}[a-z]?)", lowered)
     if room_match:
         room = room_match.group(1).upper()
+    else:
+        bare_match = re.search(r"\b([a-z]?\d{3}[a-z]?)\b", lowered)
+        if bare_match:
+            room = bare_match.group(1).upper()
 
     intent = "QUERY"
     if re.search(r"\b(stop|halt|cancel|abort)\b", lowered):
         intent = "STOP"
-    elif room and re.search(r"\b(go|navigate|head|move|find|reach|visit)\b", lowered):
+    elif room and re.search(
+        r"\b(go|navigate|head|move|find|reach|visit|take|bring|drive|walk|locate|where)\b",
+        lowered,
+    ):
         intent = "GO_TO_ROOM"
     elif re.search(r"\b(explore|look around|wander|survey|scan the area|map the area|build (?:a |the )?map)\b", lowered):
         intent = "EXPLORE"
-    elif re.search(r"\b(return|go back|come back|home|start)\b", lowered):
+    elif re.search(r"\b(return|go back|come back|head back|home|start)\b", lowered):
         intent = "RETURN_TO_START"
     elif room:
         intent = "ROOM_QUERY"

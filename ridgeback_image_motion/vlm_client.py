@@ -198,3 +198,76 @@ def rank_frontiers(
         "chosen_index": chosen,
         "reasoning": str(parsed.get("reasoning", ""))[:240],
     }
+
+
+COMMAND_PARSE_SYSTEM = (
+    "You convert short operator commands for a wheeled mobile robot into JSON. "
+    "Reply with strict JSON only, no prose."
+)
+
+COMMAND_PARSE_USER_TEMPLATE = (
+    "Classify the operator command and extract a room number if present.\n"
+    "Allowed intents:\n"
+    "  GO_TO_ROOM        — operator names a room and wants the robot to go there\n"
+    "                      (e.g. 'find 202', 'take me to room 14B', 'where is two oh four')\n"
+    "  RETURN_TO_START   — operator wants the robot to come back to start/home\n"
+    "                      (e.g. 'go home', 'come back', 'return')\n"
+    "  EXPLORE           — operator wants free exploration with no specific target\n"
+    "                      (e.g. 'wander around', 'survey the area', 'build a map')\n"
+    "  STOP              — operator wants the robot to stop now\n"
+    "                      (e.g. 'stop', 'halt', 'cancel', 'abort')\n"
+    "  QUERY             — anything else\n\n"
+    "Rules for `room`:\n"
+    "  - Uppercase alphanumeric only (e.g. '202', '2A', 'B14').\n"
+    "  - Convert spelled-out digits to numerals ('two oh two' -> '202').\n"
+    "  - Empty string '' if no room is named.\n\n"
+    "Reply JSON only: {{\"intent\": \"<INTENT>\", \"room\": \"<ROOM_OR_EMPTY>\"}}\n\n"
+    "Command: {command}"
+)
+
+
+_VALID_INTENTS = {"GO_TO_ROOM", "RETURN_TO_START", "EXPLORE", "STOP", "QUERY"}
+
+
+def parse_command(
+    client: OpenAI,
+    config: VlmConfig,
+    text: str,
+    timeout_s: float = 1.5,
+    max_tokens: int = 60,
+) -> dict[str, str]:
+    """Ask the VLM to convert an operator command into {intent, room}.
+
+    Raises on parse error or invalid intent — caller should fall back to regex.
+    """
+    command = (text or "").strip()
+    if not command:
+        raise ValueError("empty command")
+
+    user_text = COMMAND_PARSE_USER_TEMPLATE.format(command=command)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": COMMAND_PARSE_SYSTEM},
+        {"role": "user", "content": user_text},
+    ]
+    response = client.with_options(timeout=float(timeout_s)).chat.completions.create(
+        model=config.model_name,
+        messages=messages,
+        temperature=0.0,
+        max_tokens=int(max_tokens),
+        extra_body={"chat_template_kwargs": {"enable_thinking": config.enable_thinking}},
+    )
+    content = response.choices[0].message.content
+    if isinstance(content, list):
+        text_out = " ".join(str(p.get("text", "")) if isinstance(p, dict) else str(p) for p in content)
+    else:
+        text_out = str(content or "")
+    parsed = _extract_json_object(text_out)
+
+    intent = str(parsed.get("intent", "")).strip().upper()
+    if intent not in _VALID_INTENTS:
+        raise ValueError(f"invalid intent in VLM response: {text_out[:200]}")
+
+    room = str(parsed.get("room", "")).strip().upper()
+    # Strip non-alphanumeric (the VLM occasionally returns 'Room 202').
+    room = re.sub(r"[^A-Z0-9]", "", room)
+    return {"intent": intent, "room": room}

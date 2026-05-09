@@ -12,6 +12,9 @@ mission_orchestrator:
     base_frame: base_link
     room_min_confidence: 0.55
     start_tolerance_m: 0.45
+    exploration_budget_s: 300.0
+    use_vlm_command_parser: true
+    vlm_command_timeout_s: 1.5
 
 room_detector:
   ros__parameters:

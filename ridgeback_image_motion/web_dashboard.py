@@ -676,7 +676,10 @@ function renderLocationList(items) {
   return items.slice(0, 12).map(item => {
     const label = item.label || item.room_number || 'location';
     const conf = Number(item.confidence ?? 0).toFixed(2);
-    return `<div class="mono-line">${escHtml(label)} @ (${Number(item.x||0).toFixed(2)}, ${Number(item.y||0).toFixed(2)}) conf ${conf}</div>`;
+    const isNew = Boolean(item.is_new);
+    const dot = isNew ? '<span style="color:var(--accent);font-weight:bold">● </span>' : '';
+    const badge = isNew ? ' <span style="color:var(--accent);font-weight:bold">[NEW]</span>' : '';
+    return `<div class="mono-line">${dot}${escHtml(label)} @ (${Number(item.x||0).toFixed(2)}, ${Number(item.y||0).toFixed(2)}) conf ${conf}${badge}</div>`;
   }).join('');
 }
 
@@ -1663,6 +1666,23 @@ class DashboardNode(Node):
         memory_locations = self.memory.get_locations(active_session) if active_session else self.memory.get_locations()
         memory_missions = self.memory.get_recent_missions(limit=20, session_id=active_session) if active_session else self.memory.get_recent_missions(limit=20)
 
+        mission_started_at = float(self.mission_status.get("mission_started_at") or 0.0)
+        new_location_count = 0
+        for loc in memory_locations:
+            created_raw = str(loc.get("created_at") or "")
+            try:
+                created_epoch = time.mktime(time.strptime(created_raw, "%Y-%m-%dT%H:%M:%S"))
+            except Exception:
+                created_epoch = 0.0
+            is_new = bool(
+                mission_started_at
+                and created_epoch >= mission_started_at - 1.0
+                and loc.get("label") != "start_position"
+            )
+            loc["is_new"] = is_new
+            if is_new:
+                new_location_count += 1
+
         camera_alive = (now - self.last_frame_time) < 5.0 if self.last_frame_time > 0 else False
         depth_alive = (now - self.last_depth_time) < 5.0 if self.last_depth_time > 0 else False
         odom_alive = (now - self.last_odom_time) < 5.0 if self.last_odom_time > 0 else False
@@ -1734,6 +1754,8 @@ class DashboardNode(Node):
                 "mission_count": len(memory_missions),
                 "recent_locations": memory_locations[:12],
                 "recent_missions": memory_missions[:12],
+                "new_location_count": new_location_count,
+                "mission_started_at": mission_started_at,
             },
             "teleop": {
                 "status": self.teleop_status,
