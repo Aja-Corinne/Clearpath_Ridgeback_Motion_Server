@@ -17,6 +17,7 @@ from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from geometry_msgs.msg import Twist
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import String
 
@@ -50,6 +51,12 @@ class FrontierExplorer(Node):
         self.declare_parameter("vlm_max_image_age_s", 2.0)
         self.declare_parameter("image_topic", "/r100_0140/image/compressed")
         self.declare_parameter("fallback_image_topic", "/r100_0140/sensors/camera_0/color/compressed")
+        # When SLAM has no map yet (or no frontiers exist around the tiny
+        # initial free patch), publish a slow in-place rotation so SLAM grows
+        # the map until real frontiers appear.
+        self.declare_parameter("discovery_cmd_topic", "/cmd_vel_teleop")
+        self.declare_parameter("discovery_rotation_rps", 0.3)
+        self.declare_parameter("discovery_max_duration_s", 30.0)
 
         map_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         sensor_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
@@ -60,6 +67,7 @@ class FrontierExplorer(Node):
         self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, sensor_qos)
         self.create_subscription(String, self.get_parameter("command_topic").value, self._command_cb, reliable_qos)
         self.status_pub = self.create_publisher(String, self.get_parameter("status_topic").value, reliable_qos)
+        self.discovery_pub = self.create_publisher(Twist, self.get_parameter("discovery_cmd_topic").value, sensor_qos)
         self.nav_client = ActionClient(self, NavigateToPose, self.get_parameter("navigate_action").value)
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -90,6 +98,8 @@ class FrontierExplorer(Node):
         self.last_vlm_call_time = 0.0
         self.last_vlm_reasoning = ""
         self.last_selection_method = "distance"
+        self.discovery_active = False
+        self.discovery_started_at = 0.0
 
         self._vlm_client: Any = None
         self._vlm_config: Any = None
@@ -147,6 +157,7 @@ class FrontierExplorer(Node):
             self.active = False
             self.state = "IDLE"
             self._cancel_goal()
+            self._stop_discovery()
             self.get_logger().info("frontier exploration stopped")
 
     def _tick(self) -> None:
@@ -172,17 +183,20 @@ class FrontierExplorer(Node):
             self._publish_status()
             return
 
+        # Always evaluate frontiers each tick. If none, keep discovery rotation
+        # running — the mux's teleop slot expires faster than goal_check_period_s.
+        goal = self._choose_frontier_goal()
+        if goal is None:
+            self._drive_discovery()
+            self._publish_status()
+            return
+
         if time.time() - self.last_goal_time < float(self.get_parameter("goal_check_period_s").value):
             self._publish_status()
             return
 
-        goal = self._choose_frontier_goal()
-        if goal is None:
-            self.state = "FAILED"
-            self.last_error = "no_safe_frontier"
-            self._publish_status()
-            return
-
+        if self.discovery_active:
+            self._stop_discovery()
         self._send_goal(goal)
         self._publish_status()
 
@@ -387,6 +401,33 @@ class FrontierExplorer(Node):
         self.goal_handle = None
         self.result_future = None
 
+    def _drive_discovery(self) -> None:
+        max_duration = float(self.get_parameter("discovery_max_duration_s").value)
+        now = time.time()
+        if not self.discovery_active:
+            self.discovery_active = True
+            self.discovery_started_at = now
+            self.get_logger().info(
+                "no frontiers yet; rotating in place to grow SLAM map"
+            )
+        elif now - self.discovery_started_at > max_duration:
+            self._stop_discovery()
+            self.state = "FAILED"
+            self.last_error = "no_safe_frontier_after_discovery"
+            return
+        twist = Twist()
+        twist.angular.z = float(self.get_parameter("discovery_rotation_rps").value)
+        self.discovery_pub.publish(twist)
+        self.state = "DISCOVERING"
+        self.last_error = "no_frontier_rotating"
+
+    def _stop_discovery(self) -> None:
+        if self.discovery_active:
+            for _ in range(3):
+                self.discovery_pub.publish(Twist())
+        self.discovery_active = False
+        self.discovery_started_at = 0.0
+
     def _publish_status(self) -> None:
         payload = {
             "stamp": time.time(),
@@ -398,6 +439,8 @@ class FrontierExplorer(Node):
             "selection_mode": str(self.get_parameter("selection_mode").value),
             "last_selection_method": self.last_selection_method,
             "last_vlm_reasoning": self.last_vlm_reasoning,
+            "discovery_active": self.discovery_active,
+            "discovery_elapsed_s": (time.time() - self.discovery_started_at) if self.discovery_active else 0.0,
         }
         self.status_pub.publish(String(data=json_dumps(payload)))
 
