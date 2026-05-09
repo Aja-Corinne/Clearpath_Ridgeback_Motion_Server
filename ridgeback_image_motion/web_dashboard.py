@@ -1992,10 +1992,106 @@ def create_app(node: DashboardNode) -> FastAPI:
 
     @app.post("/api/chat")
     def api_chat(request: ChatRequest) -> JSONResponse:
-        parsed = parse_intent_and_room(request.message)
+        parsed = parse_intent_and_room(
+            request.message,
+            vlm_client=node.vlm_client,
+            vlm_config=node.vlm_config,
+            vlm_timeout_s=1.5,
+        )
         node.add_chat("user", request.message)
         node.add_log("vlm", f"Chat query: {request.message}")
         started_at = time.time()
+
+        # Actionable intents short-circuit the VLM chat call: publish the
+        # mission immediately and emit a deterministic confirmation. This
+        # avoids the freeform-chat VLM occasionally refusing valid commands.
+        if parsed["intent"] in {"GO_TO_ROOM", "RETURN_TO_START", "STOP", "EXPLORE"}:
+            reply = ""
+            if parsed["intent"] == "GO_TO_ROOM":
+                node.mission_command_pub.publish(
+                    String(
+                        data=json_dumps(
+                            {
+                                "command": request.message,
+                                "intent": parsed["intent"],
+                                "room": parsed["room"],
+                                "source": "chat",
+                                "timestamp": time.time(),
+                            }
+                        )
+                    )
+                )
+                room = parsed["room"]
+                active_session = str(node.mission_status.get("session_id", "")) or node.memory.get_active_session()
+                known = node.memory.find_room(active_session, room, 0.55) if active_session and room else None
+                if known:
+                    reply = (
+                        f"Got it. Heading to room {room} "
+                        f"(last seen at x={float(known['x']):.1f}, y={float(known['y']):.1f})."
+                    )
+                else:
+                    reply = (
+                        f"I haven't seen room {room} yet. Starting exploration — "
+                        f"I'll save room numbers as I find them and head there once {room} is in view."
+                    )
+            elif parsed["intent"] == "RETURN_TO_START":
+                node.mission_command_pub.publish(
+                    String(
+                        data=json_dumps(
+                            {
+                                "command": request.message,
+                                "intent": parsed["intent"],
+                                "room": parsed["room"],
+                                "source": "chat",
+                                "timestamp": time.time(),
+                            }
+                        )
+                    )
+                )
+                reply = "Returning to the start position."
+            elif parsed["intent"] == "STOP":
+                node.mission_command_pub.publish(
+                    String(
+                        data=json_dumps(
+                            {
+                                "command": request.message,
+                                "intent": parsed["intent"],
+                                "room": parsed["room"],
+                                "source": "chat",
+                                "timestamp": time.time(),
+                            }
+                        )
+                    )
+                )
+                node.exploration_command_pub.publish(
+                    String(data=json_dumps({"action": "stop", "source": "chat"}))
+                )
+                reply = "Stopping now."
+            elif parsed["intent"] == "EXPLORE":
+                node.exploration_command_pub.publish(
+                    String(data=json_dumps({"action": "start", "target_room": "", "source": "chat"}))
+                )
+                reply = (
+                    "Starting VLM-driven exploration. I'll pick frontiers from the camera view "
+                    "and drive there while SLAM builds the map. Say 'stop' to halt."
+                )
+
+            latency_ms = (time.time() - started_at) * 1000.0
+            node.add_chat("assistant", reply)
+            node.add_log("vlm", f"Reply: {reply[:180]}")
+            node.add_vlm_event(
+                kind="mission",
+                status="ok",
+                prompt=request.message,
+                answer=reply,
+                thinking="",
+                intent=parsed["intent"],
+                room=parsed["room"],
+                latency_ms=latency_ms,
+                text=reply[:220],
+            )
+            return JSONResponse({"ok": True, "reply": reply, "parsed": parsed, "latency_ms": latency_ms})
+
         try:
             latest_frame = node.latest_frame_copy()
             if latest_frame:
@@ -2037,33 +2133,7 @@ def create_app(node: DashboardNode) -> FastAPI:
                 reply = str(raw_reply or "")
             thinking = extract_reasoning_trace(response)
             latency_ms = (time.time() - started_at) * 1000.0
-            event_kind = "mission" if parsed["intent"] in {"GO_TO_ROOM", "RETURN_TO_START", "STOP", "EXPLORE"} else "prompt"
-            if parsed["intent"] in {"GO_TO_ROOM", "RETURN_TO_START", "STOP"}:
-                node.mission_command_pub.publish(
-                    String(
-                        data=json_dumps(
-                            {
-                                "command": request.message,
-                                "intent": parsed["intent"],
-                                "room": parsed["room"],
-                                "source": "chat",
-                                "timestamp": time.time(),
-                            }
-                        )
-                    )
-                )
-            if parsed["intent"] == "EXPLORE":
-                node.exploration_command_pub.publish(
-                    String(data=json_dumps({"action": "start", "target_room": "", "source": "chat"}))
-                )
-                reply = (
-                    "Starting VLM-driven exploration. I'll pick frontiers from the camera view "
-                    "and drive there while SLAM builds the map. Say 'stop' to halt."
-                )
-            elif parsed["intent"] == "STOP":
-                node.exploration_command_pub.publish(
-                    String(data=json_dumps({"action": "stop", "source": "chat"}))
-                )
+            event_kind = "prompt"
 
             node.add_chat("assistant", reply)
             node.add_log("vlm", f"Reply: {reply[:180]}")

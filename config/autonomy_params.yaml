@@ -93,6 +93,8 @@ cmd_vel_mux:
     max_lateral_mps: 0.35
     max_angular_rps: 0.80
     publish_hz: 20.0
+    warning_linear_scale: 0.35
+    warning_angular_scale: 0.6
 
 ridgeback_dashboard:
   ros__parameters:

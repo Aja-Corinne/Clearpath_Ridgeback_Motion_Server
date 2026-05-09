@@ -38,6 +38,8 @@ class CmdVelMux(Node):
         self.declare_parameter("max_lateral_mps", 0.35)
         self.declare_parameter("max_angular_rps", 0.80)
         self.declare_parameter("publish_hz", 20.0)
+        self.declare_parameter("warning_linear_scale", 0.35)
+        self.declare_parameter("warning_angular_scale", 0.6)
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
         status_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
@@ -56,7 +58,9 @@ class CmdVelMux(Node):
         self.last_nav_time = 0.0
         self.last_teleop_time = 0.0
         self.safety_forced_stop = False
+        self.safety_risk_level = "SAFE"
         self.last_source = "none"
+        self.last_applied_scale = 1.0
         self.last_status_publish = 0.0
 
         hz = max(1.0, float(self.get_parameter("publish_hz").value))
@@ -78,6 +82,7 @@ class CmdVelMux(Node):
     def _safety_status_cb(self, msg: String) -> None:
         payload = json_loads(msg.data)
         self.safety_forced_stop = not bool(payload.get("is_safe", True))
+        self.safety_risk_level = str(payload.get("risk_level", "SAFE")).upper()
 
     def _tick(self) -> None:
         now = time.time()
@@ -97,10 +102,21 @@ class CmdVelMux(Node):
             selected = self.last_teleop
             source = "teleop"
 
+        linear_scale = 1.0
+        angular_scale = 1.0
+        if (
+            source != "safety"
+            and not self.safety_forced_stop
+            and self.safety_risk_level == "WARNING"
+        ):
+            linear_scale = float(self.get_parameter("warning_linear_scale").value)
+            angular_scale = float(self.get_parameter("warning_angular_scale").value)
+        self.last_applied_scale = linear_scale
+
         safe = Twist()
-        safe.linear.x = clamp(selected.linear.x, float(self.get_parameter("max_linear_mps").value))
-        safe.linear.y = clamp(selected.linear.y, float(self.get_parameter("max_lateral_mps").value))
-        safe.angular.z = clamp(selected.angular.z, float(self.get_parameter("max_angular_rps").value))
+        safe.linear.x = clamp(selected.linear.x * linear_scale, float(self.get_parameter("max_linear_mps").value))
+        safe.linear.y = clamp(selected.linear.y * linear_scale, float(self.get_parameter("max_lateral_mps").value))
+        safe.angular.z = clamp(selected.angular.z * angular_scale, float(self.get_parameter("max_angular_rps").value))
         self.output.publish(safe)
 
         if now - self.last_status_publish >= 0.5:
@@ -108,6 +124,9 @@ class CmdVelMux(Node):
                 "stamp": now,
                 "source": source,
                 "safety_forced_stop": self.safety_forced_stop,
+                "safety_risk_level": self.safety_risk_level,
+                "applied_linear_scale": linear_scale,
+                "applied_angular_scale": angular_scale,
                 "safety_age_s": safety_age,
                 "nav_age_s": nav_age,
                 "teleop_age_s": teleop_age,
