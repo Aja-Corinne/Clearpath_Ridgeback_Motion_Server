@@ -28,7 +28,7 @@ class CmdVelMux(Node):
         self.declare_parameter("safety_topic", "/cmd_vel_safety")
         self.declare_parameter("nav_topic", "/cmd_vel_nav")
         self.declare_parameter("teleop_topic", "/cmd_vel_teleop")
-        self.declare_parameter("output_topic", "/r100_0140/cmd_vel")
+        self.declare_parameter("output_topic", "/cmd_vel_raw")
         self.declare_parameter("safety_status_topic", "/ridgeback/safety/status")
         self.declare_parameter("status_topic", "/ridgeback/cmd_vel_mux/status")
         self.declare_parameter("nav_timeout_s", 0.75)

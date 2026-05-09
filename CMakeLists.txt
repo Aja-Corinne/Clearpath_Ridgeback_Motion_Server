@@ -24,6 +24,7 @@ install(PROGRAMS
   ridgeback_image_motion/frontier_explorer.py
   ridgeback_image_motion/image_publisher.py
   ridgeback_image_motion/jetson_watchdog.py
+  ridgeback_image_motion/velocity_gate_node.py
   ridgeback_image_motion/mission_orchestrator.py
   ridgeback_image_motion/room_detector.py
   ridgeback_image_motion/safety_controller.py
