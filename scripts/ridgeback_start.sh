@@ -196,9 +196,16 @@ cleanup() {
 trap cleanup SIGINT SIGTERM
 
 # Postflight: confirm motion + image are publishing the expected topics.
-# Runs in background ~6s after services start so we don't block the foreground tail.
+# Runs in background ~8s after services start so we don't block the foreground tail.
+#
+# IMPORTANT: this Ridgeback uses a restrictive FastDDS profile that whitelists only
+# the Jetson peer IP. Intra-machine DDS discovery (ros2 node list, ros2 topic info
+# for locally-published topics) is blocked. So for processes WE launched we use
+# their PIDs + log inspection. For external publishers (LiDAR / odom from the
+# clearpath-platform service), we still use ros2 cli — those use the system DDS
+# profile and discovery does work for them.
 postflight_ridgeback() {
-    local wait_s="${RIDGEBACK_POSTFLIGHT_WAIT_S:-6}"
+    local wait_s="${RIDGEBACK_POSTFLIGHT_WAIT_S:-8}"
     sleep "$wait_s"
 
     echo ""
@@ -206,46 +213,46 @@ postflight_ridgeback() {
     echo "[POSTFLIGHT] Ridgeback (after ${wait_s}s)"
     echo "=========================================="
 
-    local required_nodes=( /motion_server /image_publisher )
-    local required_pubs=(
-        "/r100_0140/image/compressed"
-        "/r100_0140/image/depth_compressed"
+    local errs=0
+
+    check_owned_node() {
+        local label="$1" pid="$2" log="$3" ready_pattern="$4"
+        if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+            echo "  FAIL $label process (pid=${pid:-unset}) NOT alive" >&2
+            errs=$((errs + 1))
+            return
+        fi
+        if [[ -n "$ready_pattern" ]] && ! grep -qE "$ready_pattern" "$log" 2>/dev/null; then
+            echo "  FAIL $label alive (pid=$pid) but ready signal not in $log" >&2
+            errs=$((errs + 1))
+            return
+        fi
+        echo "  OK   $label alive (pid=$pid) and ready"
+    }
+
+    check_owned_node "motion_server"   "$MOTION_PID" "$MOTION_LOG" "Motion Service Server started"
+    check_owned_node "image_publisher" "$IMAGE_PID"  "$IMAGE_LOG"  "Image Publisher started"
+
+    # image_publisher periodically prints "Published N compressed frames" — proves it's publishing.
+    if grep -q "Published .* compressed frames" "$IMAGE_LOG" 2>/dev/null; then
+        echo "  OK   image_publisher producing compressed frames"
+    else
+        echo "  WARN image_publisher hasn't logged 'Published N compressed frames' yet (RealSense slow to start?)"
+    fi
+
+    # External publishers from the clearpath-platform/clearpath-sensors services
+    # — these use the system DDS config so ros2 cli can see them.
+    local external_pubs=(
         "/r100_0140/sensors/lidar2d_0/scan"
         "/r100_0140/platform/odom/filtered"
     )
-    local required_services=( /motion_service )
-
-    local errs=0
-    local nodes
-    nodes="$(timeout 4 ros2 node list 2>/dev/null || true)"
-
-    for node in "${required_nodes[@]}"; do
-        if echo "$nodes" | grep -qx "$node"; then
-            echo "  OK   node $node running"
-        else
-            echo "  FAIL node $node NOT running" >&2
-            errs=$((errs + 1))
-        fi
-    done
-
-    local services
-    services="$(timeout 4 ros2 service list 2>/dev/null || true)"
-    for svc in "${required_services[@]}"; do
-        if echo "$services" | grep -qx "$svc"; then
-            echo "  OK   service $svc available"
-        else
-            echo "  FAIL service $svc NOT available" >&2
-            errs=$((errs + 1))
-        fi
-    done
-
-    for topic in "${required_pubs[@]}"; do
+    for topic in "${external_pubs[@]}"; do
         local pub_count
         pub_count="$(timeout 3 ros2 topic info "$topic" 2>/dev/null | awk '/Publisher count:/ { print $3; exit }')"
         if [[ -n "$pub_count" && "$pub_count" != "0" ]]; then
             echo "  OK   topic $topic ($pub_count publisher(s))"
         else
-            echo "  FAIL topic $topic has NO publishers" >&2
+            echo "  FAIL topic $topic has NO publishers (clearpath-platform/sensors not running?)" >&2
             errs=$((errs + 1))
         fi
     done
@@ -254,11 +261,11 @@ postflight_ridgeback() {
     if (( errs == 0 )); then
         echo "[POSTFLIGHT] PASS — Ridgeback is ready for the Jetson stack."
     else
-        echo "[POSTFLIGHT] FAIL — ${errs} problem(s) above. Investigate the missing items before running 'goridge' on the Jetson." >&2
+        echo "[POSTFLIGHT] FAIL — ${errs} problem(s) above. Investigate before running 'goridge' on the Jetson." >&2
         echo "  Hints:" >&2
-        echo "    - LiDAR/odom missing: check 'sudo systemctl status clearpath-platform' and 'clearpath-sensors'." >&2
-        echo "    - image/compressed missing: image_publisher may have failed to open the RealSense (check $IMAGE_LOG)." >&2
-        echo "    - motion_service missing: motion_server may have failed (check $MOTION_LOG)." >&2
+        echo "    - LiDAR/odom missing: 'sudo systemctl status clearpath-platform clearpath-sensors'." >&2
+        echo "    - image_publisher dead: check $IMAGE_LOG for RealSense init errors (USB / serial 317222071726)." >&2
+        echo "    - motion_server dead: check $MOTION_LOG for import or topic-publisher failures." >&2
     fi
     echo "=========================================="
 }
