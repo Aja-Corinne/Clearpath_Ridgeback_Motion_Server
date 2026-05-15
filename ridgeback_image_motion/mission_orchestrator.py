@@ -150,6 +150,30 @@ class MissionOrchestrator(Node):
         if intent == "RETURN_TO_START":
             self._start_return(command)
             return
+
+        # Handle EXPLORE intent (pure exploration with no target room)
+        if intent == "EXPLORE":
+            self.command = command
+            self.intent = intent
+            self.target_room = ""  # No target room for pure exploration
+            self.last_error = ""
+            self.last_detection = {}
+            self.mission_started_at = time.time()
+            self.memory.record_mission(command, "started", parsed, self.session_id)
+            self.get_logger().info(f"EXPLORE intent received: '{command}'")
+
+            if not self.start_saved:
+                self.state = "STARTING"
+                self.phase = "waiting_for_start_position"
+                return
+
+            self._start_exploration()
+            self.state = "EXPLORING"
+            self.phase = "frontier_search"
+            self.get_logger().info("Starting pure frontier exploration (no target room)")
+            return
+
+        # Handle GO_TO_ROOM intent
         if intent != "GO_TO_ROOM" or not room:
             self.last_error = "unsupported_command"
             self.command = command
@@ -157,6 +181,7 @@ class MissionOrchestrator(Node):
             self.target_room = room
             self.state = "FAILED"
             self.phase = "unsupported_command"
+            self.get_logger().warn(f"Unsupported command: intent={intent}, room={room}")
             self.memory.record_mission(command, "failed", {"reason": self.last_error, **parsed}, self.session_id)
             return
 
@@ -225,7 +250,14 @@ class MissionOrchestrator(Node):
             self.memory.store_start_position(self.session_id, self.pose["x"], self.pose["y"], self.pose["yaw"])
             self.start_saved = True
             if self.state == "STARTING":
-                if self.target_room:
+                # Handle EXPLORE intent (pure exploration)
+                if self.intent == "EXPLORE":
+                    self._start_exploration()
+                    self.state = "EXPLORING"
+                    self.phase = "frontier_search"
+                    self.get_logger().info("Starting pure exploration after acquiring start position")
+                # Handle GO_TO_ROOM intent (check memory first, then explore if needed)
+                elif self.target_room:
                     known = self.memory.find_room(
                         self.session_id,
                         self.target_room,
@@ -289,6 +321,7 @@ class MissionOrchestrator(Node):
 
     def _start_exploration(self) -> None:
         self._cancel_nav_goal()
+        self.get_logger().info(f"Publishing exploration command: target_room='{self.target_room}'")
         self.explore_pub.publish(String(data=json_dumps({"action": "start", "target_room": self.target_room})))
 
     def _stop_exploration(self) -> None:

@@ -64,8 +64,7 @@ $MOCK && PROFILES="--profile mock"
 COMPOSE_OPTS="$PROFILES -f docker/docker-compose.yml --env-file .env"
 
 echo "Building images (cached after first run)..."
-docker compose $COMPOSE_OPTS build --pull never --quiet 2>/dev/null || \
-    docker compose $COMPOSE_OPTS build --quiet
+docker compose $COMPOSE_OPTS build --quiet
 
 echo ""
 echo "Starting containers..."
