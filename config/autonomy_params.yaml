@@ -85,8 +85,8 @@ cmd_vel_mux:
     safety_status_topic: /ridgeback/safety/status
     status_topic: /ridgeback/cmd_vel_mux/status
     nav_timeout_s: 0.75
-    teleop_timeout_s: 0.75
-    safety_timeout_s: 0.50
+    teleop_timeout_s: 2.0 #0.75
+    safety_timeout_s: 5.0 #0.50
     max_linear_mps: 0.45
     max_lateral_mps: 0.35
     max_angular_rps: 0.80

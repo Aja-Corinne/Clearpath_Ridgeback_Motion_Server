@@ -92,7 +92,7 @@ class CmdVelMux(Node):
 
         selected = Twist()
         source = "idle"
-        if self.safety_forced_stop or safety_age <= float(self.get_parameter("safety_timeout_s").value):
+        if self.safety_forced_stop:
             selected = Twist()
             source = "safety"
         elif nav_age <= float(self.get_parameter("nav_timeout_s").value) and twist_is_nonzero(self.last_nav):
